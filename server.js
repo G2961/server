@@ -3,18 +3,16 @@ const http = require('http');
 
 const PORT = process.env.PORT || 3000;
 
-// HTTP-сервер для health-check (нужен для Render)
 const server = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/') {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
         res.end('OK');
         return;
     }
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('WebSocket server running');
+    res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
+    res.end('WebSocket server');
 });
 
-// WebSocket-сервер
 const wss = new WebSocket.Server({ 
     server,
     clientTracking: true,
@@ -23,13 +21,13 @@ const wss = new WebSocket.Server({
 
 const clients = new Map();
 
-console.log('🚀 Signal server starting...');
+console.log('🚀 Server starting...');
 
 function broadcastUserList() {
     const users = Array.from(clients.keys());
-    const message = JSON.stringify({ type: 'userList', users });
-    clients.forEach((ws) => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(message);
+    const msg = JSON.stringify({ type: 'userList', users });
+    clients.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
     });
 }
 
@@ -43,90 +41,74 @@ function sendToUser(nickname, message) {
 }
 
 wss.on('connection', (ws, req) => {
-    const ip = req.socket.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
-    console.log(`🔗 New connection from ${ip}`);
+    const ip = req.socket.remoteAddress || 'unknown';
+    console.log(`🔗 Connect from ${ip}`);
     
     let nickname = null;
     
     ws.on('message', (raw) => {
         try {
             const msg = JSON.parse(raw);
+            console.log(`📥 [${nickname || '?'}] ${msg.type}`, msg.to ? `→ ${msg.to}` : '');
             
-            // Login
             if (msg.type === 'login') {
                 nickname = msg.myName;
                 clients.set(nickname, ws);
                 ws.nickname = nickname;
-                console.log(`✅ User "${nickname}" logged in`);
+                console.log(`✅ "${nickname}" logged in`);
                 ws.send(JSON.stringify({ type: 'welcome', myName: nickname }));
                 broadcastUserList();
                 return;
             }
             
-            // Чат
             if (msg.type === 'message') {
                 if (!msg.to || !msg.data) return;
+                // ✅ Важно: добавляем from
                 const payload = JSON.stringify({ 
                     type: 'message', 
                     from: nickname, 
-                    data: msg.data  // ✅ ИСПРАВЛЕНО: ключ: значение
+                     msg.data 
                 });
                 const ok = sendToUser(msg.to, payload);
-                if (!ok) {
-                    ws.send(JSON.stringify({ type: 'error', data: `User "${msg.to}" offline` }));
-                }
+                if (!ok) ws.send(JSON.stringify({ type: 'error',  `User "${msg.to}" offline` }));
                 return;
             }
             
-            // WebRTC сигналы
             if (['offer', 'answer', 'candidate', 'reject'].includes(msg.type)) {
                 if (!msg.to) return;
-                
-                const forward = {
-                    type: msg.type,
-                    from: nickname,
-                    to: msg.to
-                };
-                
+                const forward = { type: msg.type, from: nickname, to: msg.to };
                 if (msg.type === 'candidate') {
-                    forward.data = msg.data;  // ✅ ICE candidate
+                    forward.data = msg.data;
                 } else {
-                    forward.sdp = msg.sdp || msg.data;  // ✅ SDP для offer/answer
+                    forward.sdp = msg.sdp || msg.data;
                 }
-                
                 const ok = sendToUser(msg.to, JSON.stringify(forward));
-                if (!ok) {
-                    ws.send(JSON.stringify({ type: 'error', data: `User "${msg.to}" offline` }));
-                }
+                if (!ok) ws.send(JSON.stringify({ type: 'error',  `User "${msg.to}" offline` }));
                 return;
             }
             
-        } catch (error) {
-            console.error('❌ Parse error:', error.message);
+        } catch (e) {
+            console.error('❌ Parse:', e.message);
         }
     });
     
     ws.on('close', () => {
         if (nickname) {
-            console.log(`❌ User "${nickname}" disconnected`);
+            console.log(`❌ "${nickname}" disconnected`);
             clients.delete(nickname);
             broadcastUserList();
         }
     });
     
-    ws.on('error', (err) => {
-        console.error(`❌ WS error:`, err.message);
-    });
+    ws.on('error', e => console.error(`❌ WS error:`, e.message));
 });
 
-// Запуск сервера
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Server listening on port ${PORT}`);
+    console.log(`✅ Listening on port ${PORT}`);
 });
 
-// Keep-alive
 setInterval(() => {
-    wss.clients.forEach((ws) => {
+    wss.clients.forEach(ws => {
         if (ws.readyState === WebSocket.OPEN) ws.ping();
     });
 }, 30000);
